@@ -1,0 +1,20 @@
+{
+  "name": "Lab Book",
+  "short_name": "LabBook",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#060E1A",
+  "theme_color": "#38BDF8",
+  "icons": [
+    {
+      "src": "https://placehold.co/192x192/060E1A/38BDF8?text=LB",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://placehold.co/512x512/060E1A/38BDF8?text=LB",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
