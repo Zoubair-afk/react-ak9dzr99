@@ -651,7 +651,9 @@ export default function App() {
             gap: 16,
           }}
         >
-          <div style={{ fontSize: 36 }}>⚗</div>
+          <div style={S.authLogoIcon}>
+  <img src="/logo.png" alt="logo" style={{ width: 44, height: 44, objectFit: 'contain' }} />
+</div>
           <div style={{ fontSize: 14, fontWeight: 700, color: '#38BDF8' }}>
             Connecting to Lab Book…
           </div>
@@ -861,7 +863,7 @@ export default function App() {
               color: '#38BDF8',
             }}
           >
-            LAB BOOK
+            ADELBOOK
           </span>
           <span style={{ fontSize: 11, color: '#22C55E', opacity: 0.7 }}>
             ● live
@@ -1071,7 +1073,9 @@ function AuthScreen({ onLogin, onSignup }) {
   return (
     <div style={S.authWrap}>
       <div style={S.authLogo}>
-        <div style={S.authLogoIcon}>⚗</div>
+        <div style={S.authLogoIcon}>
+  <img src="/logo.png" alt="logo" style={{ width: 44, height: 44, objectFit: 'contain' }} />
+</div>
         <div
           style={{
             fontSize: 28,
@@ -1080,7 +1084,7 @@ function AuthScreen({ onLogin, onSignup }) {
             marginTop: 10,
           }}
         >
-          Lab Book
+          Adelbook
         </div>
         <div style={{ fontSize: 12, color: '#334155', marginTop: 4 }}>
           Instrument Booking System
