@@ -2607,7 +2607,7 @@ function ScheduleView({
               return (
                 <button
                   key={d}
-                  onClick={() => { setSelectedDate(d); setViewMode('day'); }}
+                  onClick={() => setSelectedDate(d)}
                   style={{
                     textAlign: 'center',
                     background: isSel
@@ -3488,30 +3488,8 @@ function MyBookingsView({
         ? a.start_time.localeCompare(b.start_time)
         : a.date.localeCompare(b.date)
     );
-
-  // Collapse multi-day group_id bookings into a single representative entry.
-  // Each "entry" is { representative: booking, group: booking[] }
-  function collapseGroups(list) {
-    const seen = new Set();
-    const entries = [];
-    for (const b of list) {
-      if (b.group_id) {
-        if (seen.has(b.group_id)) continue;
-        seen.add(b.group_id);
-        const group = list
-          .filter((x) => x.group_id === b.group_id)
-          .sort((a, z) => a.date.localeCompare(z.date));
-        entries.push({ representative: group[0], group });
-      } else {
-        entries.push({ representative: b, group: [b] });
-      }
-    }
-    return entries;
-  }
-
-  const upcoming = collapseGroups(mine.filter((b) => b.date >= todayStr));
-  const past = collapseGroups(mine.filter((b) => b.date < todayStr));
-
+  const upcoming = mine.filter((b) => b.date >= todayStr);
+  const past = mine.filter((b) => b.date < todayStr);
   return (
     <div className="view">
       <SubHeader
@@ -3530,11 +3508,10 @@ function MyBookingsView({
           </span>
         </div>
       )}
-      {upcoming.map(({ representative: b, group }) => (
+      {upcoming.map((b) => (
         <BookingCard
-          key={b.group_id || b.id}
+          key={b.id}
           b={b}
-          group={group}
           instruments={instruments}
           bookings={bookings}
           onCancel={onCancel}
@@ -3552,8 +3529,8 @@ function MyBookingsView({
           >
             PAST
           </div>
-          {past.map(({ representative: b, group }) => (
-            <BookingCard key={b.group_id || b.id} b={b} group={group} instruments={instruments} bookings={bookings} past />
+          {past.map((b) => (
+            <BookingCard key={b.id} b={b} instruments={instruments} bookings={bookings} past />
           ))}
         </>
       )}
@@ -3561,17 +3538,10 @@ function MyBookingsView({
   );
 }
 
-function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past }) {
+function BookingCard({ b, instruments, bookings, onCancel, onUpdate, past }) {
   const t = useT();
   const inst = instruments.find((i) => i.id === b.instrument_id);
   if (!inst) return null;
-
-  const isMultiDay = group.length > 1;
-  const firstDay = isMultiDay ? group[0] : b;
-  const lastDay = isMultiDay ? group[group.length - 1] : b;
-  const totalDays = group.length;
-
-  // For single-day: show duration. For multi-day: show total days.
   const dur = durationMins(b.start_time, b.end_time);
 
   const [editing, setEditing] = useState(false);
@@ -3580,25 +3550,15 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
   const [editNote, setEditNote] = useState(b.note || '');
   const [saving, setSaving] = useState(false);
 
-  const editConflict = editing && !isMultiDay && bookings.some((bk) => {
+  const editConflict = editing && bookings.some((bk) => {
     if (bk.id === b.id || bk.instrument_id !== b.instrument_id || bk.date !== b.date || bk.cancelled) return false;
-    return !(toMins(editEnd) <= toMins(bk.start_time) || toMins(editStart) >= toMins(bk.end_time));
+    return !(editEnd <= bk.start_time || editStart >= bk.end_time);
   });
 
   async function saveEdit() {
     if (editConflict || saving) return;
     setSaving(true);
-    if (isMultiDay) {
-      // Update first day start, last day end, and note on all rows
-      await Promise.all(group.map((row, i) => {
-        const updates = { note: editNote };
-        if (i === 0) updates.start_time = editStart;
-        if (i === group.length - 1) updates.end_time = editEnd;
-        return onUpdate(row.id, updates);
-      }));
-    } else {
-      await onUpdate(b.id, { start_time: editStart, end_time: editEnd, note: editNote });
-    }
+    await onUpdate(b.id, { start_time: editStart, end_time: editEnd, note: editNote });
     setSaving(false);
     setEditing(false);
   }
@@ -3612,12 +3572,26 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
         opacity: past ? 0.55 : 1,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+        }}
+      >
         <div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: past ? '#475569' : inst.color }}>
+          <div
+            style={{
+              fontSize: 14,
+              fontWeight: 700,
+              color: past ? '#475569' : inst.color,
+            }}
+          >
             {inst.icon} {inst.name}
           </div>
-          <div style={{ fontSize: 10, color: '#475569', marginTop: 1 }}>{inst.code}</div>
+          <div style={{ fontSize: 10, color: '#475569', marginTop: 1 }}>
+            {inst.code}
+          </div>
         </div>
         {!past && (
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -3648,7 +3622,7 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
                   fontSize: 10,
                 }}
               >
-                Cancel
+                {b.group_id ? 'Cancel all days' : 'Cancel'}
               </button>
             )}
           </div>
@@ -3659,11 +3633,11 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <div>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>{isMultiDay ? 'FIRST DAY START' : 'START'}</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>START</div>
               <input type="time" value={editStart} onChange={(e) => setEditStart(e.target.value)} style={S.input} className="inp" />
             </div>
             <div>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>{isMultiDay ? 'LAST DAY END' : 'END'}</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>END</div>
               <input type="time" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} style={S.input} className="inp" />
             </div>
           </div>
@@ -3683,24 +3657,23 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
       ) : (
         <>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-            {isMultiDay ? (
-              <>
-                <Chip icon="📅">
-                  {fmtDate(firstDay.date, { month: 'short', day: 'numeric' })} → {fmtDate(lastDay.date, { month: 'short', day: 'numeric' })}
-                </Chip>
-                <Chip icon="🗓">{totalDays} days</Chip>
-                <Chip icon="🕐">{fmt12(firstDay.start_time)} – {fmt12(lastDay.end_time)}</Chip>
-              </>
-            ) : (
-              <>
-                <Chip icon="📅">{fmtDate(b.date)}</Chip>
-                <Chip icon="🕐">{fmt12(b.start_time)} – {fmt12(b.end_time)}</Chip>
-                <Chip icon="⏱">{Math.floor(dur / 60)}h{dur % 60 > 0 ? ` ${dur % 60}m` : ''}</Chip>
-              </>
-            )}
+            <Chip icon="📅">{fmtDate(b.date)}</Chip>
+            <Chip icon="🕐">
+              {fmt12(b.start_time)} – {fmt12(b.end_time)}
+            </Chip>
+            <Chip icon="⏱">
+              {Math.floor(dur / 60)}h{dur % 60 > 0 ? ` ${dur % 60}m` : ''}
+            </Chip>
           </div>
           {b.note && (
-            <div style={{ fontSize: 11, color: '#475569', marginTop: 8, fontStyle: 'italic' }}>
+            <div
+              style={{
+                fontSize: 11,
+                color: '#475569',
+                marginTop: 8,
+                fontStyle: 'italic',
+              }}
+            >
               "{b.note}"
             </div>
           )}
