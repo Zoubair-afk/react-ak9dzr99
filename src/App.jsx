@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // 🔧 SUPABASE CONFIG
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -459,9 +458,9 @@ export default function App() {
           existing.cancelled
         )
           return false;
-        return !(
-          b.endTime <= existing.start_time || b.startTime >= existing.end_time
-        );
+          return !(
+            toMins(b.endTime) <= toMins(existing.start_time) || toMins(b.startTime) >= toMins(existing.end_time)
+          );
       });
       if (hasConflict) {
         showToast(
@@ -480,7 +479,7 @@ export default function App() {
         end_time: b.endTime,
         note: b.note || '',
         cancelled: false,
-        recurring: b.recurring ? JSON.stringify(b.recurring) : null,
+        recurring: null,
       });
       setBookings((p) => [...p, nb]);
       showToast('Booking confirmed ✓');
@@ -1430,8 +1429,6 @@ function NewBookingView({
   const [startTime, setStart] = useState('09:00');
   const [endTime, setEnd] = useState('10:00');
   const [note, setNote] = useState('');
-  const [recurring, setRecurring] = useState('none');
-  const [recCount, setRecCount] = useState(4);
   const [showPicker, setShowPicker] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1461,7 +1458,7 @@ function NewBookingView({
             b.cancelled
           )
             return false;
-          return !(endTime <= b.start_time || startTime >= b.end_time);
+          return !(toMins(endTime) <= toMins(b.start_time) || toMins(startTime) >= toMins(b.end_time));
         })
       )
     : false;
@@ -1744,62 +1741,7 @@ function NewBookingView({
         </div>
 
         {/* Recurring */}
-        <div>
-          <FieldLabel>RECURRING</FieldLabel>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {['none', 'daily', 'weekly'].map((r) => (
-              <button
-                key={r}
-                onClick={() => setRecurring(r)}
-                style={{
-                  ...S.pill,
-                  cursor: 'pointer',
-                  flex: 1,
-                  justifyContent: 'center',
-                  padding: '8px 0',
-                  fontSize: 11,
-                  background:
-                    recurring === r
-                      ? (instrument?.color ?? '#38BDF8') + '33'
-                      : '#0F172A',
-                  color:
-                    recurring === r
-                      ? instrument?.color ?? '#38BDF8'
-                      : '#64748B',
-                  border: `1px solid ${
-                    recurring === r
-                      ? (instrument?.color ?? '#38BDF8') + '55'
-                      : '#1E293B'
-                  }`,
-                }}
-              >
-                {r === 'none' ? 'Once' : r.charAt(0).toUpperCase() + r.slice(1)}
-              </button>
-            ))}
-          </div>
-          {recurring !== 'none' && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                marginTop: 8,
-              }}
-            >
-              <span style={{ fontSize: 12, color: '#64748B' }}>Repeat</span>
-              <input
-                type="number"
-                min={2}
-                max={52}
-                value={recCount}
-                onChange={(e) => setRecCount(Number(e.target.value))}
-                style={{ ...S.input, width: 60, textAlign: 'center' }}
-                className="inp"
-              />
-              <span style={{ fontSize: 12, color: '#64748B' }}>times</span>
-            </div>
-          )}
-        </div>
+        
 
         {conflict && (
           <div style={S.conflictBanner}>
@@ -1845,8 +1787,7 @@ function NewBookingView({
             </span>
           ) : multiDay ? (
             `Book ${dates.length} days`
-          ) : recurring !== 'none' ? (
-            `Book ${recCount}× ${recurring}`
+         
           ) : (
             'Confirm Booking'
           )}
@@ -2894,7 +2835,7 @@ function QuickBookPopup({
             return false;
           const s = date === dragInfo.startDate ? startTime : '00:00';
           const e = date === dragInfo.endDate ? endTime : '23:59';
-          return !(e <= b.start_time || s >= b.end_time);
+          return !(toMins(e) <= toMins(b.start_time) || toMins(s) >= toMins(b.end_time));
         })
       )
     : false;
