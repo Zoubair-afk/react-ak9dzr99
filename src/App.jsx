@@ -909,6 +909,7 @@ export default function App() {
               account={currentAccount}
               onCancel={cancelBookingGroup}
               onUpdate={updateBooking}
+              onAdd={addBooking}
               onBack={() => navigate('home')}
               navigate={navigate}
             />
@@ -1429,6 +1430,8 @@ function NewBookingView({
   const [startTime, setStart] = useState('09:00');
   const [endTime, setEnd] = useState('10:00');
   const [note, setNote] = useState('');
+  const [recurring, setRecurring] = useState('none');
+  const [recCount, setRecCount] = useState(4);
   const [showPicker, setShowPicker] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1872,10 +1875,7 @@ function ScheduleView({
   const dragStartY = useRef(0);
   const dragActivated = useRef(false);
   const [dragVis, setDragVis] = useState(null);
-  const dragPointerEl = useRef(null);
-  const dragPointerId = useRef(null);
-  const dragStartX = useRef(0);
-  const dragCancelled = useRef(false);
+
 
   const HOUR_H = 52; // px per hour
   const DRAG_PX = 10; // min pixels before drag activates
@@ -1982,43 +1982,23 @@ function ScheduleView({
 
   function onPointerDown(e, date, el) {
     if (e.target.closest('[data-booking]')) return;
-    // Don't capture yet — wait until we confirm it's a drag, not a scroll
+    e.currentTarget.setPointerCapture(e.pointerId);
     const mins = getMins(e.clientY, el);
     dragStartDate.current = date;
     dragStartMins.current = mins;
     dragEndDate.current = date;
     dragEndMins.current = mins + 60;
     dragStartY.current = e.clientY;
-    dragStartX.current = e.clientX;
     dragActivated.current = false;
-    dragCancelled.current = false;
-    dragPointerEl.current = e.currentTarget;
-    dragPointerId.current = e.pointerId;
     setDragVis(null);
   }
 
   function onPointerMove(e, date, el) {
-    if (!dragStartDate.current || dragCancelled.current) return;
-
-    const dy = e.clientY - dragStartY.current;
-    const dx = e.clientX - dragStartX.current;
-    const dist = Math.abs(dy);
-    const isTouch = e.pointerType === 'touch';
-    const threshold = isTouch ? 28 : DRAG_PX;
-
+    if (!dragStartDate.current) return;
     if (!dragActivated.current) {
-      if (dist < threshold) return;
-      // Straight downward touch = scroll intent, bail
-      if (isTouch && Math.abs(dx) < 8 && dy > 0) {
-        dragCancelled.current = true;
-        dragStartDate.current = null;
-        return;
-      }
-      // Confirmed drag — capture pointer now
-      try { dragPointerEl.current?.setPointerCapture(dragPointerId.current); } catch {}
+      if (Math.abs(e.clientY - dragStartY.current) < DRAG_PX) return;
       dragActivated.current = true;
     }
-
     const mins = getMins(e.clientY, el);
     dragEndDate.current = date;
     dragEndMins.current = mins;
@@ -2043,7 +2023,6 @@ function ScheduleView({
     if (!dragStartDate.current) return;
     const activated = dragActivated.current;
     dragActivated.current = false;
-    dragCancelled.current = false;
     if (!activated) {
       dragStartDate.current = null;
       return;
@@ -2260,7 +2239,7 @@ function ScheduleView({
         style={{
           position: 'relative',
           height: HOUR_H * 24,
-          touchAction: 'pan-y',
+          touchAction: 'none',
           userSelect: 'none',
         }}
         onPointerDown={(e) => onPointerDown(e, date, colRef.current)}
@@ -3478,6 +3457,7 @@ function MyBookingsView({
   account,
   onCancel,
   onUpdate,
+  onAdd,
   onBack,
   navigate,
 }) {
@@ -3539,6 +3519,7 @@ function MyBookingsView({
           bookings={bookings}
           onCancel={onCancel}
           onUpdate={onUpdate}
+          onAdd={onAdd}
         />
       ))}
       {past.length > 0 && (
@@ -3561,7 +3542,7 @@ function MyBookingsView({
   );
 }
 
-function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past }) {
+function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, onAdd, past }) {
   const t = useT();
   const inst = instruments.find((i) => i.id === b.instrument_id);
   if (!inst) return null;
@@ -3575,29 +3556,54 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
   const dur = durationMins(b.start_time, b.end_time);
 
   const [editing, setEditing] = useState(false);
-  const [editStart, setEditStart] = useState(b.start_time);
-  const [editEnd, setEditEnd] = useState(b.end_time);
+  const [editStartDate, setEditStartDate] = useState(firstDay.date);
+  const [editEndDate, setEditEndDate] = useState(lastDay.date);
+  const [editStart, setEditStart] = useState(firstDay.start_time);
+  const [editEnd, setEditEnd] = useState(lastDay.end_time);
   const [editNote, setEditNote] = useState(b.note || '');
   const [saving, setSaving] = useState(false);
 
-  const editConflict = editing && !isMultiDay && bookings.some((bk) => {
-    if (bk.id === b.id || bk.instrument_id !== b.instrument_id || bk.date !== b.date || bk.cancelled) return false;
-    return !(toMins(editEnd) <= toMins(bk.start_time) || toMins(editStart) >= toMins(bk.end_time));
-  });
+  function getEditDates() {
+    const dates = [];
+    const d = new Date(editStartDate + 'T12:00:00');
+    const end = new Date(editEndDate + 'T12:00:00');
+    while (d <= end) { dates.push(d.toISOString().split('T')[0]); d.setDate(d.getDate() + 1); }
+    return dates;
+  }
+  const editDates = getEditDates();
+  const editIsMultiDay = editDates.length > 1;
+
+  const editConflict = editing && editDates.some((date) =>
+    bookings.some((bk) => {
+      // Exclude all rows in the current group from conflict check
+      const groupIds = group.map(r => r.id);
+      if (groupIds.includes(bk.id) || bk.instrument_id !== b.instrument_id || bk.date !== date || bk.cancelled) return false;
+      const s = date === editStartDate ? editStart : '00:00';
+      const e = date === editEndDate ? editEnd : '23:59';
+      return !(toMins(e) <= toMins(bk.start_time) || toMins(s) >= toMins(bk.end_time));
+    })
+  );
 
   async function saveEdit() {
-    if (editConflict || saving) return;
+    if (editConflict || saving || !onAdd) return;
     setSaving(true);
-    if (isMultiDay) {
-      // Update first day start, last day end, and note on all rows
-      await Promise.all(group.map((row, i) => {
-        const updates = { note: editNote };
-        if (i === 0) updates.start_time = editStart;
-        if (i === group.length - 1) updates.end_time = editEnd;
-        return onUpdate(row.id, updates);
-      }));
-    } else {
-      await onUpdate(b.id, { start_time: editStart, end_time: editEnd, note: editNote });
+    // Cancel all existing rows in this group
+    await onCancel(b.group_id || null, b.id);
+    // Re-insert with new date range
+    const gid = editDates.length > 1 ? b.group_id || genId() : null;
+    for (const date of editDates) {
+      const s = date === editStartDate ? editStart : '00:00';
+      const e = date === editEndDate ? editEnd : '23:59';
+      await onAdd({
+        groupId: gid,
+        instrumentId: b.instrument_id,
+        user: b.user_display_name,
+        date,
+        startTime: s,
+        endTime: e,
+        note: editNote,
+        recurring: null,
+      });
     }
     setSaving(false);
     setEditing(false);
@@ -3623,7 +3629,7 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             {onUpdate && (
               <button
-                onClick={() => { setEditing((e) => !e); setEditStart(b.start_time); setEditEnd(b.end_time); setEditNote(b.note || ''); }}
+                onClick={() => { setEditing((e) => !e); setEditStartDate(firstDay.date); setEditEndDate(lastDay.date); setEditStart(firstDay.start_time); setEditEnd(lastDay.end_time); setEditNote(b.note || ''); }}
                 style={{
                   ...S.pill,
                   background: editing ? inst.color + '33' : t.bg2,
@@ -3659,11 +3665,26 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <div>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>{isMultiDay ? 'FIRST DAY START' : 'START'}</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>START DATE</div>
+              <input type="date" value={editStartDate} onChange={(e) => { setEditStartDate(e.target.value); if (e.target.value > editEndDate) setEditEndDate(e.target.value); }} style={S.input} className="inp" />
+            </div>
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>END DATE</div>
+              <input type="date" value={editEndDate} min={editStartDate} onChange={(e) => setEditEndDate(e.target.value)} style={S.input} className="inp" />
+            </div>
+          </div>
+          {editIsMultiDay && (
+            <div style={{ ...S.chip, color: '#4ADE80', background: '#4ADE8018', justifyContent: 'center' }}>
+              📅 {editDates.length}-day booking
+            </div>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>{editIsMultiDay ? 'FIRST DAY START' : 'START TIME'}</div>
               <input type="time" value={editStart} onChange={(e) => setEditStart(e.target.value)} style={S.input} className="inp" />
             </div>
             <div>
-              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>{isMultiDay ? 'LAST DAY END' : 'END'}</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#475569', marginBottom: 4 }}>{editIsMultiDay ? 'LAST DAY END' : 'END TIME'}</div>
               <input type="time" value={editEnd} onChange={(e) => setEditEnd(e.target.value)} style={S.input} className="inp" />
             </div>
           </div>
@@ -3677,7 +3698,7 @@ function BookingCard({ b, group, instruments, bookings, onCancel, onUpdate, past
             disabled={editConflict || saving}
             style={{ ...S.submitBtn, background: editConflict ? '#1E293B' : inst.color, color: editConflict ? '#475569' : '#000' }}
           >
-            {saving ? 'Saving…' : 'Save changes'}
+            {saving ? 'Saving…' : editIsMultiDay ? `Save ${editDates.length}-day booking` : 'Save changes'}
           </button>
         </div>
       ) : (
