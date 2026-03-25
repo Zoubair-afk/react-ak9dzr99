@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createClient } from '@supabase/supabase-js';
 // ═══════════════════════════════════════════════════════════════════════════════
 // 🔧 SUPABASE CONFIG
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -15,107 +16,6 @@ const SUPABASE_ANON =
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Minimal Supabase client ──────────────────────────────────────────────────
-function createClient(url, key) {
-  const headers = {
-    'Content-Type': 'application/json',
-    apikey: key,
-    Authorization: `Bearer ${key}`,
-  };
-  async function from(table) {
-    const base = `${url}/rest/v1/${table}`;
-    return {
-      async select(cols = '*', opts = {}) {
-        let q = `${base}?select=${cols}`;
-        if (opts.eq)
-          Object.entries(opts.eq).forEach(([k, v]) => {
-            q += `&${k}=eq.${encodeURIComponent(v)}`;
-          });
-        if (opts.neq)
-          Object.entries(opts.neq).forEach(([k, v]) => {
-            q += `&${k}=neq.${encodeURIComponent(v)}`;
-          });
-        if (opts.order) q += `&order=${opts.order}`;
-        const r = await fetch(q, {
-          headers: { ...headers, Prefer: 'return=representation' },
-        });
-        if (!r.ok) throw new Error(await r.text());
-        return r.json();
-      },
-      async insert(data) {
-        const r = await fetch(base, {
-          method: 'POST',
-          headers: { ...headers, Prefer: 'return=representation' },
-          body: JSON.stringify(data),
-        });
-        if (!r.ok) throw new Error(await r.text());
-        return r.json();
-      },
-      async update(data, match) {
-        let q = `${base}?`;
-        Object.entries(match).forEach(([k, v]) => {
-          q += `${k}=eq.${encodeURIComponent(v)}&`;
-        });
-        const r = await fetch(q, {
-          method: 'PATCH',
-          headers: { ...headers, Prefer: 'return=representation' },
-          body: JSON.stringify(data),
-        });
-        if (!r.ok) throw new Error(await r.text());
-        return r.json();
-      },
-      async delete(match) {
-        let q = `${base}?`;
-        Object.entries(match).forEach(([k, v]) => {
-          q += `${k}=eq.${encodeURIComponent(v)}&`;
-        });
-        const r = await fetch(q, { method: 'DELETE', headers });
-        if (!r.ok) throw new Error(await r.text());
-        return true;
-      },
-    };
-  }
-  function channel(name) {
-    let ws,
-      handlers = {};
-    return {
-      on(event, filter, cb) {
-        handlers[filter?.event ?? event] = cb;
-        return this;
-      },
-      subscribe() {
-        const wsUrl = `${url.replace(
-          'https',
-          'wss'
-        )}/realtime/v1/websocket?apikey=${key}&vsn=1.0.0`;
-        ws = new WebSocket(wsUrl);
-        ws.onopen = () => {
-          ws.send(
-            JSON.stringify({
-              topic: `realtime:${name}`,
-              event: 'phx_join',
-              payload: {},
-              ref: '1',
-            })
-          );
-        };
-        ws.onmessage = (e) => {
-          try {
-            const msg = JSON.parse(e.data);
-            const ev = msg.payload?.data?.type;
-            if (ev && handlers[ev]) handlers[ev](msg.payload.data);
-            if (handlers['*']) handlers['*'](msg.payload?.data);
-          } catch {}
-        };
-        return this;
-      },
-      unsubscribe() {
-        ws?.close();
-      },
-    };
-  }
-  return { from: (t) => from(t), channel };
-}
-
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -292,16 +192,14 @@ export default function App() {
     setLoading(true);
     setDbError(null);
     try {
-      const [accs, insts, bks] = await Promise.all([
-        (await sb.from('accounts')).select('*'),
-        (await sb.from('instruments')).select('*', { order: 'name.asc' }),
-        (
-          await sb.from('bookings')
-        ).select('*', { order: 'date.asc,start_time.asc' }),
+      const [{ data: accs }, { data: insts }, { data: bks }] = await Promise.all([
+        sb.from('accounts').select('*'),
+        sb.from('instruments').select('*').order('name', { ascending: true }),
+        sb.from('bookings').select('*').order('date', { ascending: true }).order('start_time', { ascending: true }),
       ]);
-      setAccounts(accs);
-      setInstruments(insts);
-      setBookings(bks);
+      setAccounts(accs || []);
+      setInstruments(insts || []);
+      setBookings(bks || []);
     } catch (e) {
       setDbError(e.message || 'Could not connect to database.');
     } finally {
@@ -312,58 +210,43 @@ export default function App() {
   useEffect(() => {
     const ch = sb
       .channel('public:all')
-      .on('postgres_changes', { event: '*' }, (payload) => {
-        const { type, table, new: row, old } = payload;
-        if (table === 'bookings') {
-          if (type === 'INSERT') {
-            setBookings((p) => [...p, row]);
-            if (row.user_display_name !== currentAccount?.display_name)
-              pushNotif(
-                `📅 ${row.user_display_name} booked ${
-                  instruments.find((i) => i.id === row.instrument_id)?.name ??
-                  ''
-                } on ${fmtDate(row.date)}`
-              );
-          }
-          if (type === 'UPDATE')
-            setBookings((p) => p.map((b) => (b.id === row.id ? row : b)));
-          if (type === 'DELETE')
-            setBookings((p) => p.filter((b) => b.id !== old.id));
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
+        const { eventType: type, new: row, old } = payload;
+        if (type === 'INSERT') {
+          setBookings((p) => [...p, row]);
+          if (row.user_display_name !== currentAccount?.display_name)
+            pushNotif(`📅 ${row.user_display_name} booked ${instruments.find((i) => i.id === row.instrument_id)?.name ?? ''} on ${fmtDate(row.date)}`);
         }
-        if (table === 'instruments') {
-          if (type === 'INSERT') setInstruments((p) => [...p, row]);
-          if (type === 'UPDATE')
-            setInstruments((p) => p.map((i) => (i.id === row.id ? row : i)));
-          if (type === 'DELETE')
-            setInstruments((p) => p.filter((i) => i.id !== old.id));
-        }
-        if (table === 'accounts') {
-          if (type === 'INSERT') setAccounts((p) => [...p, row]);
-          if (type === 'UPDATE')
-            setAccounts((p) => p.map((a) => (a.id === row.id ? row : a)));
-          if (type === 'DELETE')
-            setAccounts((p) => p.filter((a) => a.id !== old.id));
-        }
+        if (type === 'UPDATE') setBookings((p) => p.map((b) => (b.id === row.id ? row : b)));
+        if (type === 'DELETE') setBookings((p) => p.filter((b) => b.id !== old.id));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'instruments' }, (payload) => {
+        const { eventType: type, new: row, old } = payload;
+        if (type === 'INSERT') setInstruments((p) => [...p, row]);
+        if (type === 'UPDATE') setInstruments((p) => p.map((i) => (i.id === row.id ? row : i)));
+        if (type === 'DELETE') setInstruments((p) => p.filter((i) => i.id !== old.id));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'accounts' }, (payload) => {
+        const { eventType: type, new: row, old } = payload;
+        if (type === 'INSERT') setAccounts((p) => [...p, row]);
+        if (type === 'UPDATE') setAccounts((p) => p.map((a) => (a.id === row.id ? row : a)));
+        if (type === 'DELETE') setAccounts((p) => p.filter((a) => a.id !== old.id));
       })
       .subscribe();
     realtimeRef.current = ch;
     async function poll() {
       try {
-        const [bks, insts, accs] = await Promise.all([
-          (
-            await sb.from('bookings')
-          ).select('*', { order: 'date.asc,start_time.asc' }),
-          (await sb.from('instruments')).select('*', { order: 'name.asc' }),
-          (await sb.from('accounts')).select('*'),
+        const [{ data: bks }, { data: insts }, { data: accs }] = await Promise.all([
+          sb.from('bookings').select('*').order('date', { ascending: true }).order('start_time', { ascending: true }),
+          sb.from('instruments').select('*').order('name', { ascending: true }),
+          sb.from('accounts').select('*'),
         ]);
-        setBookings(bks);
-        setInstruments(insts);
-        setAccounts(accs);
-      } catch (e) {
-        /* silent */
-      }
+        if (bks) setBookings(bks);
+        if (insts) setInstruments(insts);
+        if (accs) setAccounts(accs);
+      } catch (e) { /* silent */ }
     }
-    const pollInterval = setInterval(poll, 30000);
+    const pollInterval = setInterval(poll, 30000); // every 30s instead of 5s
 
     return () => {
       ch.unsubscribe();
@@ -417,8 +300,7 @@ export default function App() {
       return '❌ Your account request was not approved. Contact a lab admin.';
     if (acc.password_hash === oldHash) {
       try {
-        const db = await sb.from('accounts');
-        await db.update({ password_hash: newHash }, { id: acc.id });
+        await sb.from('accounts').update({ password_hash: newHash }).eq('id', acc.id);
         setAccounts((p) =>
           p.map((a) => (a.id === acc.id ? { ...a, password_hash: newHash } : a))
         );
@@ -444,16 +326,16 @@ export default function App() {
     )
       return 'Username already taken.';
     try {
-      const db = await sb.from('accounts');
-      const [newAcc] = await db.insert({
+      const { data: newAccArr } = await sb.from('accounts').insert({
         id: genId(),
         username: username.trim().toLowerCase(),
         display_name: displayName.trim(),
         password_hash: await hashPw(password),
         is_admin: false,
         status: 'pending',
-      });
-      setAccounts((p) => [...p, newAcc]);
+      }, { returning: 'representation' });
+      const newAcc = newAccArr?.[0];
+      if (newAcc) setAccounts((p) => [...p, newAcc]);
       const s = { accountId: newAcc.id };
       setSession(s);
       saveSession(s);
@@ -475,7 +357,7 @@ export default function App() {
   async function addBooking(b) {
     try {
       // Re-fetch caller's account to verify approval status hasn't changed
-      const freshAccounts = await (await sb.from('accounts')).select('*');
+      const { data: freshAccounts } = await sb.from('accounts').select('*');
       const callerAcc = freshAccounts.find((a) => a.id === session?.accountId);
       const callerStatus = callerAcc?.status ?? 'approved';
       if (callerStatus === 'pending' || callerStatus === 'rejected') {
@@ -483,11 +365,8 @@ export default function App() {
         setAccounts(freshAccounts);
         return;
       }
-      const freshBookings = await (
-        await sb.from('bookings')
-      ).select('*', { order: 'date.asc,start_time.asc' });
+      const { data: freshBookings } = await sb.from('bookings').select('*').order('date', { ascending: true }).order('start_time', { ascending: true });
       setBookings(freshBookings);
-      const db = await sb.from('bookings');
       const hasConflict = freshBookings.some((existing) => {
         if (
           existing.instrument_id !== b.instrumentId ||
@@ -512,7 +391,7 @@ export default function App() {
         showToast(ruleError, 'error');
         return;
       }
-      const [nb] = await db.insert({
+      const { data: nbArr } = await sb.from('bookings').insert({
         id: genId(),
         group_id: b.groupId || null,
         instrument_id: b.instrumentId,
@@ -523,8 +402,9 @@ export default function App() {
         note: b.note || '',
         cancelled: false,
         recurring: null,
-      });
-      setBookings((p) => [...p, nb]);
+      }, { returning: 'representation' });
+      const nb = nbArr?.[0];
+      if (nb) setBookings((p) => [...p, nb]);
       showToast('Booking confirmed ✓');
     } catch (e) {
       showToast(e.message || 'Booking failed', 'error');
@@ -533,8 +413,7 @@ export default function App() {
 
   async function cancelBooking(id) {
     try {
-      const db = await sb.from('bookings');
-      await db.update({ cancelled: true }, { id });
+      await sb.from('bookings').update({ cancelled: true }).eq('id', id);
       setBookings((p) =>
         p.map((b) => (b.id === id ? { ...b, cancelled: true } : b))
       );
@@ -547,12 +426,11 @@ export default function App() {
   // Cancel entire multi-day group or a single booking
   async function cancelBookingGroup(groupId, singleId) {
     try {
-      const db = await sb.from('bookings');
       const targets = groupId
         ? bookings.filter((b) => b.group_id === groupId).map((b) => b.id)
         : [singleId];
       await Promise.all(
-        targets.map((id) => db.update({ cancelled: true }, { id }))
+        targets.map((id) => sb.from('bookings').update({ cancelled: true }).eq('id', id))
       );
       setBookings((p) =>
         p.map((b) => (targets.includes(b.id) ? { ...b, cancelled: true } : b))
@@ -570,8 +448,7 @@ export default function App() {
 
   async function updateBooking(id, updates) {
     try {
-      const db = await sb.from('bookings');
-      await db.update(updates, { id });
+      await sb.from('bookings').update(updates).eq('id', id);
       setBookings((p) =>
         p.map((b) => (b.id === id ? { ...b, ...updates } : b))
       );
@@ -583,9 +460,9 @@ export default function App() {
 
   async function addInstrument(inst) {
     try {
-      const db = await sb.from('instruments');
-      const [ni] = await db.insert({ id: genId(), ...inst });
-      setInstruments((p) => [...p, ni]);
+      const { data: niArr } = await sb.from('instruments').insert({ id: genId(), ...inst }, { returning: 'representation' });
+      const ni = niArr?.[0];
+      if (ni) setInstruments((p) => [...p, ni]);
       showToast(`${inst.name} added ✓`);
     } catch (e) {
       showToast(e.message || 'Failed', 'error');
@@ -594,8 +471,7 @@ export default function App() {
 
   async function updateInstrument(id, updates) {
     try {
-      const db = await sb.from('instruments');
-      await db.update(updates, { id });
+      await sb.from('instruments').update(updates).eq('id', id);
       setInstruments((p) =>
         p.map((i) => (i.id === id ? { ...i, ...updates } : i))
       );
@@ -607,8 +483,7 @@ export default function App() {
 
   async function deleteInstrument(id) {
     try {
-      const db = await sb.from('instruments');
-      await db.delete({ id });
+      await sb.from('instruments').delete().eq('id', id);
       setInstruments((p) => p.filter((i) => i.id !== id));
       setBookings((p) =>
         p.map((b) => (b.instrument_id === id ? { ...b, cancelled: true } : b))
@@ -621,8 +496,7 @@ export default function App() {
 
   async function deleteAccount(id) {
     try {
-      const db = await sb.from('accounts');
-      await db.delete({ id });
+      await sb.from('accounts').delete().eq('id', id);
       setAccounts((p) => p.filter((a) => a.id !== id));
       if (id === currentAccount?.id) logout();
       showToast('Account removed', 'warn');
@@ -633,8 +507,7 @@ export default function App() {
 
   async function promoteAccount(id) {
     try {
-      const db = await sb.from('accounts');
-      await db.update({ is_admin: true }, { id });
+      await sb.from('accounts').update({ is_admin: true }).eq('id', id);
       setAccounts((p) =>
         p.map((a) => (a.id === id ? { ...a, is_admin: true } : a))
       );
@@ -646,8 +519,7 @@ export default function App() {
 
   async function approveAccount(id) {
     try {
-      const db = await sb.from('accounts');
-      await db.update({ status: 'approved' }, { id });
+      await sb.from('accounts').update({ status: 'approved' }).eq('id', id);
       setAccounts((p) =>
         p.map((a) => (a.id === id ? { ...a, status: 'approved' } : a))
       );
@@ -659,8 +531,7 @@ export default function App() {
 
   async function rejectAccount(id) {
     try {
-      const db = await sb.from('accounts');
-      await db.update({ status: 'rejected' }, { id });
+      await sb.from('accounts').update({ status: 'rejected' }).eq('id', id);
       setAccounts((p) =>
         p.map((a) => (a.id === id ? { ...a, status: 'rejected' } : a))
       );
