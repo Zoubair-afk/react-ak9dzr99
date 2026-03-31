@@ -18,6 +18,13 @@ const SUPABASE_ANON =
 // ─── Minimal Supabase client ──────────────────────────────────────────────────
 const sb = createClient(SUPABASE_URL, SUPABASE_ANON);
 
+const ACCOUNT_LIST_COLUMNS = 'id, username, display_name, is_admin, status';
+const ACCOUNT_LOGIN_COLUMNS = `${ACCOUNT_LIST_COLUMNS}, password_hash`;
+const INSTRUMENT_COLUMNS = 'id, name, code, category, color, icon, max_days, rules';
+const BOOKING_COLUMNS =
+  'id, group_id, instrument_id, user_display_name, date, start_time, end_time, note, cancelled, recurring';
+const BOOKING_WINDOW_DAYS = 60;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function genId() {
   return crypto.randomUUID
@@ -178,6 +185,43 @@ export default function App() {
   }, []);
   const realtimeRef = useRef(null);
 
+  function endDateStr(daysAhead = BOOKING_WINDOW_DAYS) {
+    const d = new Date();
+    d.setDate(d.getDate() + daysAhead);
+    return d.toISOString().split('T')[0];
+  }
+
+  async function loadSessionAccount(accountId) {
+    if (!accountId) {
+      setAccounts([]);
+      return null;
+    }
+    const { data: account, error } = await sb
+      .from('accounts')
+      .select(ACCOUNT_LIST_COLUMNS)
+      .eq('id', accountId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!account) {
+      setSession(null);
+      saveSession(null);
+      setAccounts([]);
+      return null;
+    }
+    setAccounts([account]);
+    return account;
+  }
+
+  async function loadAdminAccounts() {
+    const { data, error } = await sb
+      .from('accounts')
+      .select(ACCOUNT_LIST_COLUMNS)
+      .order('display_name', { ascending: true });
+    if (error) throw error;
+    setAccounts(data || []);
+    return data || [];
+  }
+
   const currentAccount =
     accounts.find((a) => a.id === session?.accountId) ?? null;
   // Treat null/undefined status as 'approved' for backwards compatibility
@@ -186,20 +230,33 @@ export default function App() {
 
   useEffect(() => {
     loadAll();
-  }, []);
+  }, [session?.accountId]);
 
   async function loadAll() {
     setLoading(true);
     setDbError(null);
     try {
-      const [{ data: accs }, { data: insts }, { data: bks }] = await Promise.all([
-        sb.from('accounts').select('*'),
-        sb.from('instruments').select('*').order('name', { ascending: true }),
-        sb.from('bookings').select('*').order('date', { ascending: true }).order('start_time', { ascending: true }),
+      const [{ data: insts, error: instErr }, { data: bks, error: bksErr }] = await Promise.all([
+        sb.from('instruments').select(INSTRUMENT_COLUMNS).order('name', { ascending: true }),
+        sb
+          .from('bookings')
+          .select(BOOKING_COLUMNS)
+          .gte('date', todayStr)
+          .lte('date', endDateStr())
+          .order('date', { ascending: true })
+          .order('start_time', { ascending: true }),
       ]);
-      setAccounts(accs || []);
+
+      if (instErr) throw instErr;
+      if (bksErr) throw bksErr;
+
       setInstruments(insts || []);
       setBookings(bks || []);
+
+      const account = await loadSessionAccount(session?.accountId);
+      if (account?.is_admin) {
+        await loadAdminAccounts();
+      }
     } catch (e) {
       setDbError(e.message || 'Could not connect to database.');
     } finally {
@@ -208,52 +265,59 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (document.hidden) return undefined;
+
+    const channelName = currentAccount?.is_admin ? 'public:admin-live' : 'public:user-live';
     const ch = sb
-      .channel('public:all')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
+      .channel(channelName)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, async (payload) => {
         const { eventType: type, new: row, old } = payload;
+        if (row?.date && (row.date < todayStr || row.date > endDateStr())) return;
+
         if (type === 'INSERT') {
-          setBookings((p) => [...p, row]);
+          setBookings((p) => {
+            if (p.some((b) => b.id === row.id)) return p;
+            const next = [...p, row];
+            next.sort((a, b) =>
+              a.date === b.date
+                ? a.start_time.localeCompare(b.start_time)
+                : a.date.localeCompare(b.date)
+            );
+            return next;
+          });
           if (row.user_display_name !== currentAccount?.display_name)
             pushNotif(`📅 ${row.user_display_name} booked ${instruments.find((i) => i.id === row.instrument_id)?.name ?? ''} on ${fmtDate(row.date)}`);
         }
-        if (type === 'UPDATE') setBookings((p) => p.map((b) => (b.id === row.id ? row : b)));
-        if (type === 'DELETE') setBookings((p) => p.filter((b) => b.id !== old.id));
+        if (type === 'UPDATE') {
+          setBookings((p) => p.map((b) => (b.id === row.id ? row : b)));
+        }
+        if (type === 'DELETE') {
+          setBookings((p) => p.filter((b) => b.id !== old.id));
+        }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'instruments' }, (payload) => {
         const { eventType: type, new: row, old } = payload;
-        if (type === 'INSERT') setInstruments((p) => [...p, row]);
+        if (type === 'INSERT') setInstruments((p) => [...p, row].sort((a, b) => a.name.localeCompare(b.name)));
         if (type === 'UPDATE') setInstruments((p) => p.map((i) => (i.id === row.id ? row : i)));
         if (type === 'DELETE') setInstruments((p) => p.filter((i) => i.id !== old.id));
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'accounts' }, (payload) => {
+      });
+
+    if (currentAccount?.is_admin) {
+      ch.on('postgres_changes', { event: '*', schema: 'public', table: 'accounts' }, (payload) => {
         const { eventType: type, new: row, old } = payload;
-        if (type === 'INSERT') setAccounts((p) => [...p, row]);
+        if (type === 'INSERT') setAccounts((p) => [...p, row].sort((a, b) => a.display_name.localeCompare(b.display_name)));
         if (type === 'UPDATE') setAccounts((p) => p.map((a) => (a.id === row.id ? row : a)));
         if (type === 'DELETE') setAccounts((p) => p.filter((a) => a.id !== old.id));
-      })
-      .subscribe();
-    realtimeRef.current = ch;
-    async function poll() {
-      try {
-        const [{ data: bks }, { data: insts }, { data: accs }] = await Promise.all([
-          sb.from('bookings').select('*').order('date', { ascending: true }).order('start_time', { ascending: true }),
-          sb.from('instruments').select('*').order('name', { ascending: true }),
-          sb.from('accounts').select('*'),
-        ]);
-        if (bks) setBookings(bks);
-        if (insts) setInstruments(insts);
-        if (accs) setAccounts(accs);
-      } catch (e) { /* silent */ }
+      });
     }
-    
-    // every 30s instead of 5s
+
+    ch.subscribe();
+    realtimeRef.current = ch;
 
     return () => {
       ch.unsubscribe();
-      clearInterval(pollInterval);
     };
-  }, []);
+  }, [currentAccount?.id, currentAccount?.is_admin, currentAccount?.display_name, instruments]);
 
   function showToast(msg, type = 'success') {
     setToast({ msg, type, id: genId() });
@@ -279,9 +343,13 @@ export default function App() {
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   async function login(username, password) {
-    const acc = accounts.find(
-      (a) => a.username.toLowerCase() === username.trim().toLowerCase()
-    );
+    const normalizedUsername = username.trim().toLowerCase();
+    const { data: acc, error } = await sb
+      .from('accounts')
+      .select(ACCOUNT_LOGIN_COLUMNS)
+      .eq('username', normalizedUsername)
+      .maybeSingle();
+    if (error) return error.message || 'Login failed.';
     if (!acc) return 'No account found with that username.';
     const newHash = await hashPw(password);
     const oldHash = (function (pw) {
@@ -302,9 +370,19 @@ export default function App() {
     if (acc.password_hash === oldHash) {
       try {
         await sb.from('accounts').update({ password_hash: newHash }).eq('id', acc.id);
-        setAccounts((p) =>
-          p.map((a) => (a.id === acc.id ? { ...a, password_hash: newHash } : a))
-        );
+      } catch (e) {}
+    }
+    const accountView = {
+      id: acc.id,
+      username: acc.username,
+      display_name: acc.display_name,
+      is_admin: acc.is_admin,
+      status: acc.status,
+    };
+    setAccounts([accountView]);
+    if (accountView.is_admin) {
+      try {
+        await loadAdminAccounts();
       } catch (e) {}
     }
     const s = { accountId: acc.id };
@@ -320,23 +398,33 @@ export default function App() {
     if (username.trim().length < 3)
       return 'Username must be at least 3 characters.';
     if (password.length < 4) return 'Password must be at least 4 characters.';
-    if (
-      accounts.find(
-        (a) => a.username.toLowerCase() === username.trim().toLowerCase()
-      )
-    )
-      return 'Username already taken.';
+    const normalizedUsername = username.trim().toLowerCase();
+    const { data: existing, error: existingErr } = await sb
+      .from('accounts')
+      .select('id')
+      .eq('username', normalizedUsername)
+      .maybeSingle();
+    if (existingErr) return existingErr.message || 'Signup failed.';
+    if (existing) return 'Username already taken.';
     try {
       const { data: newAccArr } = await sb.from('accounts').insert({
         id: genId(),
-        username: username.trim().toLowerCase(),
+        username: normalizedUsername,
         display_name: displayName.trim(),
         password_hash: await hashPw(password),
         is_admin: false,
         status: 'pending',
       }, { returning: 'representation' });
       const newAcc = newAccArr?.[0];
-      if (newAcc) setAccounts((p) => [...p, newAcc]);
+      if (newAcc) {
+        setAccounts([{
+          id: newAcc.id,
+          username: newAcc.username,
+          display_name: newAcc.display_name,
+          is_admin: newAcc.is_admin,
+          status: newAcc.status,
+        }]);
+      }
       const s = { accountId: newAcc.id };
       setSession(s);
       saveSession(s);
@@ -357,27 +445,33 @@ export default function App() {
   // ── Booking CRUD ───────────────────────────────────────────────────────────
   async function addBooking(b) {
     try {
-      // Re-fetch caller's account to verify approval status hasn't changed
-      const { data: freshAccounts } = await sb.from('accounts').select('*');
-      const callerAcc = freshAccounts.find((a) => a.id === session?.accountId);
+      const { data: callerAcc, error: callerErr } = await sb
+        .from('accounts')
+        .select(ACCOUNT_LIST_COLUMNS)
+        .eq('id', session?.accountId)
+        .maybeSingle();
+      if (callerErr) throw callerErr;
+
       const callerStatus = callerAcc?.status ?? 'approved';
       if (callerStatus === 'pending' || callerStatus === 'rejected') {
         showToast('Your account is not approved to make bookings.', 'error');
-        setAccounts(freshAccounts);
+        if (callerAcc) setAccounts([callerAcc]);
         return;
       }
-      const { data: freshBookings } = await sb.from('bookings').select('*').order('date', { ascending: true }).order('start_time', { ascending: true });
-      setBookings(freshBookings);
-      const hasConflict = freshBookings.some((existing) => {
-        if (
-          existing.instrument_id !== b.instrumentId ||
-          existing.date !== b.date ||
-          existing.cancelled
-        )
-          return false;
-          return !(
-            toMins(b.endTime) <= toMins(existing.start_time) || toMins(b.startTime) >= toMins(existing.end_time)
-          );
+
+      const { data: freshBookings, error: bookingErr } = await sb
+        .from('bookings')
+        .select('id, instrument_id, date, start_time, end_time, cancelled')
+        .eq('instrument_id', b.instrumentId)
+        .eq('date', b.date)
+        .eq('cancelled', false)
+        .order('start_time', { ascending: true });
+      if (bookingErr) throw bookingErr;
+
+      const hasConflict = (freshBookings || []).some((existing) => {
+        return !(
+          toMins(b.endTime) <= toMins(existing.start_time) || toMins(b.startTime) >= toMins(existing.end_time)
+        );
       });
       if (hasConflict) {
         showToast(
@@ -403,7 +497,7 @@ export default function App() {
         note: b.note || '',
         cancelled: false,
         recurring: null,
-      }, { returning: 'representation' });
+      }, { returning: 'representation' }).select(BOOKING_COLUMNS);
       const nb = nbArr?.[0];
       if (nb) setBookings((p) => [...p, nb]);
       showToast('Booking confirmed ✓');

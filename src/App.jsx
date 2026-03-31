@@ -171,7 +171,7 @@ export default function App() {
   const [session, setSession] = useState(loadSession);
   const [accounts, setAccounts] = useState([]);
   const [instruments, setInstruments] = useState([]);
-  const [bookings, setBookings] = useState([]);
+  const [homeBookings, setHomeBookings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [dbError, setDbError] = useState(null);
   const [view, setView] = useState('home');
@@ -185,12 +185,7 @@ export default function App() {
   }, []);
   const realtimeRef = useRef(null);
 
-  function endDateStr(daysAhead = BOOKING_WINDOW_DAYS) {
-    const d = new Date();
-    d.setDate(d.getDate() + daysAhead);
-    return d.toISOString().split('T')[0];
-  }
-
+  
   async function loadSessionAccount(accountId) {
     if (!accountId) {
       setAccounts([]);
@@ -226,7 +221,7 @@ export default function App() {
     accounts.find((a) => a.id === session?.accountId) ?? null;
   // Treat null/undefined status as 'approved' for backwards compatibility
   const currentStatus = currentAccount?.status ?? 'approved';
-  const activeBookings = bookings.filter((b) => !b.cancelled);
+  const activeHomeBookings = homeBookings.filter((b) => !b.cancelled);
 
   useEffect(() => {
     loadAll();
@@ -236,22 +231,20 @@ export default function App() {
     setLoading(true);
     setDbError(null);
     try {
-      const [{ data: insts, error: instErr }, { data: bks, error: bksErr }] = await Promise.all([
+      const [{ data: insts, error: instErr }, { data: todayBks, error: todayErr }] = await Promise.all([
         sb.from('instruments').select(INSTRUMENT_COLUMNS).order('name', { ascending: true }),
         sb
           .from('bookings')
           .select(BOOKING_COLUMNS)
-          .gte('date', todayStr)
-          .lte('date', endDateStr())
-          .order('date', { ascending: true })
+          .eq('date', todayStr)
           .order('start_time', { ascending: true }),
       ]);
 
       if (instErr) throw instErr;
-      if (bksErr) throw bksErr;
+      if (todayErr) throw todayErr;
 
       setInstruments(insts || []);
-      setBookings(bks || []);
+      setHomeBookings(todayBks || []);
 
       const account = await loadSessionAccount(session?.accountId);
       if (account?.is_admin) {
@@ -272,34 +265,28 @@ export default function App() {
       .channel(channelName)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, async (payload) => {
         const { eventType: type, new: row, old } = payload;
-        if (row?.date && (row.date < todayStr || row.date > endDateStr())) return;
+        const bookingDate = row?.date || old?.date;
+        if (bookingDate !== todayStr) return;
 
         if (type === 'INSERT') {
-          setBookings((p) => {
+          setHomeBookings((p) => {
             if (p.some((b) => b.id === row.id)) return p;
             const next = [...p, row];
-            next.sort((a, b) =>
-              a.date === b.date
-                ? a.start_time.localeCompare(b.start_time)
-                : a.date.localeCompare(b.date)
-            );
+            next.sort((a, b) => a.start_time.localeCompare(b.start_time));
             return next;
           });
           if (row.user_display_name !== currentAccount?.display_name)
             pushNotif(`📅 ${row.user_display_name} booked ${instruments.find((i) => i.id === row.instrument_id)?.name ?? ''} on ${fmtDate(row.date)}`);
         }
         if (type === 'UPDATE') {
-          setBookings((p) => p.map((b) => (b.id === row.id ? row : b)));
+          setHomeBookings((p) => {
+            const mapped = p.map((b) => (b.id === row.id ? row : b));
+            return mapped.filter((b) => b.date === todayStr);
+          });
         }
         if (type === 'DELETE') {
-          setBookings((p) => p.filter((b) => b.id !== old.id));
+          setHomeBookings((p) => p.filter((b) => b.id !== old.id));
         }
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'instruments' }, (payload) => {
-        const { eventType: type, new: row, old } = payload;
-        if (type === 'INSERT') setInstruments((p) => [...p, row].sort((a, b) => a.name.localeCompare(b.name)));
-        if (type === 'UPDATE') setInstruments((p) => p.map((i) => (i.id === row.id ? row : i)));
-        if (type === 'DELETE') setInstruments((p) => p.filter((i) => i.id !== old.id));
       });
 
     if (currentAccount?.is_admin) {
@@ -499,7 +486,7 @@ export default function App() {
         recurring: null,
       }, { returning: 'representation' }).select(BOOKING_COLUMNS);
       const nb = nbArr?.[0];
-      if (nb) setBookings((p) => [...p, nb]);
+      if (nb?.date === todayStr) setHomeBookings((p) => [...p, nb]);
       showToast('Booking confirmed ✓');
     } catch (e) {
       showToast(e.message || 'Booking failed', 'error');
@@ -509,7 +496,7 @@ export default function App() {
   async function cancelBooking(id) {
     try {
       await sb.from('bookings').update({ cancelled: true }).eq('id', id);
-      setBookings((p) =>
+      setHomeBookings((p) =>
         p.map((b) => (b.id === id ? { ...b, cancelled: true } : b))
       );
       showToast('Booking cancelled', 'warn');
@@ -527,7 +514,7 @@ export default function App() {
       await Promise.all(
         targets.map((id) => sb.from('bookings').update({ cancelled: true }).eq('id', id))
       );
-      setBookings((p) =>
+      setHomeBookings((p) =>
         p.map((b) => (targets.includes(b.id) ? { ...b, cancelled: true } : b))
       );
       showToast(
@@ -544,7 +531,7 @@ export default function App() {
   async function updateBooking(id, updates) {
     try {
       await sb.from('bookings').update(updates).eq('id', id);
-      setBookings((p) =>
+      setHomeBookings((p) =>
         p.map((b) => (b.id === id ? { ...b, ...updates } : b))
       );
       showToast('Booking updated ✓');
@@ -580,7 +567,7 @@ export default function App() {
     try {
       await sb.from('instruments').delete().eq('id', id);
       setInstruments((p) => p.filter((i) => i.id !== id));
-      setBookings((p) =>
+      setHomeBookings((p) =>
         p.map((b) => (b.instrument_id === id ? { ...b, cancelled: true } : b))
       );
       showToast('Instrument removed', 'warn');
@@ -880,7 +867,7 @@ export default function App() {
         <div style={S.content}>
           {view === 'home' && (
             <HomeView
-              bookings={activeBookings}
+              bookings={activeHomeBookings}
               instruments={instruments}
               account={currentAccount}
               navigate={navigate}
@@ -888,7 +875,7 @@ export default function App() {
           )}
           {view === 'newBooking' && (
             <NewBookingView
-              bookings={activeBookings}
+              bookings={[]}
               instruments={instruments}
               account={currentAccount}
               preselect={viewData.preselect}
@@ -899,7 +886,7 @@ export default function App() {
           )}
           {view === 'schedule' && (
             <ScheduleView
-              bookings={activeBookings}
+              bookings={[]}
               instruments={instruments}
               account={currentAccount}
               initInst={viewData.instrument}
@@ -912,8 +899,7 @@ export default function App() {
             />
           )}
           {view === 'myBookings' && (
-            <MyBookingsView
-              bookings={activeBookings}
+            <MyBookingsDataView
               instruments={instruments}
               account={currentAccount}
               onCancel={cancelBookingGroup}
@@ -924,10 +910,9 @@ export default function App() {
             />
           )}
           {view === 'admin' && (
-            <AdminView
+            <AdminDataView
               instruments={instruments}
               accounts={accounts}
-              bookings={activeBookings}
               currentAccount={currentAccount}
               onAddInstrument={addInstrument}
               onUpdateInstrument={updateInstrument}
@@ -949,9 +934,8 @@ export default function App() {
             />
           )}
           {view === 'profile' && (
-            <ProfileView
+            <ProfileDataView
               account={currentAccount}
-              bookings={activeBookings}
               instruments={instruments}
               onLogout={logout}
               onBack={() => navigate('home')}
@@ -1209,6 +1193,83 @@ function AuthScreen({ onLogin, onSignup }) {
   );
 }
 
+
+function addDays(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + days);
+  return d.toISOString().split('T')[0];
+}
+function monthRange(year, month) {
+  const start = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+  const end = new Date(year, month + 1, 0).toISOString().split('T')[0];
+  return { start, end };
+}
+async function fetchBookingsRange({ startDate, endDate, instrumentId = null, userDisplayName = null, columns = BOOKING_COLUMNS }) {
+  let query = sb
+    .from('bookings')
+    .select(columns)
+    .gte('date', startDate)
+    .lte('date', endDate)
+    .order('date', { ascending: true })
+    .order('start_time', { ascending: true });
+  if (instrumentId && instrumentId !== 'all') query = query.eq('instrument_id', instrumentId);
+  if (userDisplayName) query = query.eq('user_display_name', userDisplayName);
+  const { data, error } = await query;
+  if (error) throw error;
+  return data || [];
+}
+function InlineLoadingCard({ label = 'Loading…' }) {
+  return (
+    <div style={{ ...S.card, margin: '0 16px', color: '#64748B', textAlign: 'center' }}>
+      {label}
+    </div>
+  );
+}
+function MyBookingsDataView(props) {
+  const { account } = props;
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    fetchBookingsRange({ startDate: todayStr, endDate: addDays(todayStr, 365), userDisplayName: account.display_name })
+      .then((rows) => { if (alive) setBookings(rows.filter((b) => !b.cancelled)); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [account.display_name]);
+  if (loading) return <InlineLoadingCard label="Loading your bookings…" />;
+  return <MyBookingsView {...props} bookings={bookings} />;
+}
+function ProfileDataView(props) {
+  const { account } = props;
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    fetchBookingsRange({ startDate: todayStr, endDate: addDays(todayStr, 365), userDisplayName: account.display_name })
+      .then((rows) => { if (alive) setBookings(rows.filter((b) => !b.cancelled)); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [account.display_name]);
+  if (loading) return <InlineLoadingCard label="Loading profile…" />;
+  return <ProfileView {...props} bookings={bookings} />;
+}
+function AdminDataView(props) {
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    fetchBookingsRange({ startDate: todayStr, endDate: addDays(todayStr, 120) })
+      .then((rows) => { if (alive) setBookings(rows.filter((b) => !b.cancelled)); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, []);
+  if (loading) return <InlineLoadingCard label="Loading admin data…" />;
+  return <AdminView {...props} bookings={bookings} />;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // HOME VIEW
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1431,6 +1492,8 @@ function NewBookingView({
   onBack,
   showToast,
 }) {
+  const [rangeBookings, setRangeBookings] = useState([]);
+  const [rangeLoading, setRangeLoading] = useState(false);
   const [instrumentId, setInstrumentId] = useState(
     preselect ?? instruments[0]?.id
   );
@@ -1461,9 +1524,37 @@ function NewBookingView({
   const multiDay = dates.length > 1;
   const dur = multiDay ? 1 : durationMins(startTime, endTime);
 
+  useEffect(() => {
+    if (!instrument?.id || !dates.length) {
+      setRangeBookings([]);
+      return;
+    }
+    let alive = true;
+    setRangeLoading(true);
+    fetchBookingsRange({
+      startDate,
+      endDate,
+      instrumentId: instrument.id,
+    })
+      .then((rows) => {
+        if (alive) setRangeBookings(rows.filter((b) => !b.cancelled));
+      })
+      .catch(() => {
+        if (alive) setRangeBookings([]);
+      })
+      .finally(() => {
+        if (alive) setRangeLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [instrument?.id, startDate, endDate]);
+
+  const localBookings = rangeBookings;
+
   const conflict = instrument
     ? dates.some((date) =>
-        bookings.some((b) => {
+        localBookings.some((b) => {
           if (
             b.instrument_id !== instrument.id ||
             b.date !== date ||
@@ -1480,8 +1571,8 @@ function NewBookingView({
 
   function suggestSlot() {
     if (!instrument) return;
-    const dayB = bookings
-      .filter((b) => b.instrument_id === instrument.id && b.date === startDate)
+    const dayB = localBookings
+      .filter((b) => b.date === startDate)
       .sort((a, b) => a.start_time.localeCompare(b.start_time));
     let cursor = 480;
     for (const b of dayB) {
@@ -1552,13 +1643,8 @@ function NewBookingView({
     onBack();
   }
 
-  const dayExisting = bookings
-    .filter(
-      (b) =>
-        instrument &&
-        b.instrument_id === instrument.id &&
-        dates.includes(b.date)
-    )
+  const dayExisting = localBookings
+    .filter((b) => dates.includes(b.date))
     .sort((a, b) =>
       a.date === b.date
         ? a.start_time.localeCompare(b.start_time)
@@ -1811,7 +1897,7 @@ function NewBookingView({
 
         <button
           onClick={submit}
-          disabled={invalid || conflict || !!ruleError || submitting}
+          disabled={invalid || conflict || !!ruleError || submitting || rangeLoading}
           style={{
             ...S.submitBtn,
             background:
@@ -1835,7 +1921,7 @@ function NewBookingView({
             `Book ${dates.length} days`
          
           ) : (
-            'Confirm Booking'
+            rangeLoading ? 'Checking availability…' : 'Confirm Booking'
           )}
         </button>
       </div>
@@ -1890,7 +1976,7 @@ function NewBookingView({
 // SCHEDULE VIEW
 // ═══════════════════════════════════════════════════════════════════════════════
 function ScheduleView({
-  bookings,
+  _bookings,
   instruments,
   account,
   initInst,
@@ -1909,6 +1995,9 @@ function ScheduleView({
   const [calMonth, setCalMonth] = useState(NOW.getMonth());
   const [quickBook, setQuickBook] = useState(null);
   const [detailBook, setDetailBook] = useState(null);
+  const [scheduleBookings, setScheduleBookings] = useState([]);
+  const [rangeLoading, setRangeLoading] = useState(true);
+  const bookings = scheduleBookings;
 
   // Drag state — stored in refs to avoid re-render storms during move
   const dragStartDate = useRef(null);
@@ -1983,6 +2072,66 @@ function ScheduleView({
     });
   }
   const weekDays = getWeekDays();
+  const visibleRange = viewMode === 'month'
+    ? monthRange(calYear, calMonth)
+    : viewMode === 'week'
+    ? { start: weekDays[0], end: weekDays[6] }
+    : { start: selectedDate, end: selectedDate };
+
+  useEffect(() => {
+    let alive = true;
+    setRangeLoading(true);
+    fetchBookingsRange({
+      startDate: visibleRange.start,
+      endDate: visibleRange.end,
+      instrumentId: filterInst !== 'all' ? filterInst : null,
+    })
+      .then((rows) => {
+        if (alive) setScheduleBookings(rows.filter((b) => !b.cancelled));
+      })
+      .catch(() => {
+        if (alive) setScheduleBookings([]);
+      })
+      .finally(() => {
+        if (alive) setRangeLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [visibleRange.start, visibleRange.end, filterInst]);
+
+  useEffect(() => {
+    if (document.hidden) return undefined;
+    const channel = sb
+      .channel(`schedule:${filterInst}:${visibleRange.start}:${visibleRange.end}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
+        const row = payload.new || payload.old;
+        if (!row?.date) return;
+        if (row.date < visibleRange.start || row.date > visibleRange.end) return;
+        if (filterInst !== 'all' && row.instrument_id !== filterInst) return;
+        const nextRow = payload.new;
+        if (payload.eventType === 'INSERT' && !nextRow.cancelled) {
+          setScheduleBookings((prev) => {
+            if (prev.some((b) => b.id === nextRow.id)) return prev;
+            return [...prev, nextRow].sort((a, b) => a.date === b.date ? a.start_time.localeCompare(b.start_time) : a.date.localeCompare(b.date));
+          });
+        }
+        if (payload.eventType === 'UPDATE') {
+          setScheduleBookings((prev) => {
+            const without = prev.filter((b) => b.id !== nextRow.id);
+            if (nextRow.cancelled) return without;
+            return [...without, nextRow].sort((a, b) => a.date === b.date ? a.start_time.localeCompare(b.start_time) : a.date.localeCompare(b.date));
+          });
+        }
+        if (payload.eventType === 'DELETE') {
+          setScheduleBookings((prev) => prev.filter((b) => b.id !== payload.old.id));
+        }
+      })
+      .subscribe();
+    return () => {
+      channel.unsubscribe();
+    };
+  }, [filterInst, visibleRange.start, visibleRange.end]);
   function hasBookings(date) {
     return bookings.some(
       (b) =>
@@ -3207,7 +3356,7 @@ function QuickBookPopup({
           ) : multiDay ? (
             `Confirm ${dates.length}-day booking`
           ) : (
-            'Confirm Booking'
+            rangeLoading ? 'Checking availability…' : 'Confirm Booking'
           )}
         </button>
       </div>
